@@ -1,6 +1,6 @@
 # DocUNet: Document Image Unwarping via A Stacked U-Net
 
-[论文](https://www3.cs.stonybrook.edu/~cvl/content/papers/2018/Ma_CVPR18.pdf) [讲解](https://zhuanlan.zhihu.com/p/37306349)
+[paper](https://www3.cs.stonybrook.edu/~cvl/content/papers/2018/Ma_CVPR18.pdf) [zhihu](https://zhuanlan.zhihu.com/p/37306349)
 
 ## how to run
 
