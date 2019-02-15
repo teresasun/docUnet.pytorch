@@ -1,0 +1,512 @@
+/*
+根据扫描文档生成扭曲和折叠的文档
+需要人为设定的值
+V._strength 表示像素点偏移的强度
+alpha 这个值越大，扭曲和折叠效果越全局，越小，扭曲和折叠效果越局部
+*/
+#include <iostream>  
+#include <time.h>  
+#include <opencv2/opencv.hpp>
+#include "SparseMatrix.h"
+#include <math.h>
+#include <stdlib.h>
+#define random_int(x)(rand()%x)
+#define random_xs(x)(((rand()%10)/10.0)*x)
+
+using namespace std;
+const double PI = acos(-1);
+
+int row_top_move;
+int col_left_move;
+int row_bottom_move;
+int col_right_move;
+
+struct V
+{
+	int _strength;
+	double _x_angle; // 和x轴之间的夹角
+	double _z_angle; // 和z轴之间的夹角
+	double _x; // x轴方向的长度
+	double _y; // y轴方向的长度
+	double _z; // z轴方向的长度
+	V(const int strength)
+		:_strength(strength)
+	{
+		this->_x_angle = random_xs(PI * 2);
+		this->_z_angle = random_xs(PI * 2);
+		this->init();
+	};
+	V(int x_angle, int z_angle, const int strength)
+		:_x_angle(x_angle)
+		, _z_angle(z_angle)
+		, _strength(strength)
+	{
+		this->init();
+	};
+	void init()
+	{
+		this->_z = this->_strength * sin(this->_z_angle);
+		double x_y_strength = this->_strength * cos(this->_z_angle);
+		this->_x = x_y_strength * cos(this->_x_angle);
+		this->_y = x_y_strength * sin(this->_x_angle);
+	}
+	friend ostream& operator<<(ostream& _cout, V& v)
+	{
+		return _cout << "_x_angle:" << v._x_angle << ",_z_angle:" << v._z_angle << ",_strength:" << v._strength
+			<< ",x:" << v._x << ",y:" << v._y << ",z:" << v._z;
+	};
+};
+
+//************************************
+// Method:    构造一个稀疏矩阵
+// FullName:  get_spares_matrix
+// Access:    public 
+// Returns:   SparseMatrix<cv::Vec3b> 构造完成的稀疏矩阵
+// Qualifier:
+// Parameter: const cv::Mat img 图像
+// Parameter: const int dilated 稀疏矩阵的稀疏度，1表示每隔1隔0像素就有一个为1像素
+// Parameter: const bool extend 像素之间是否填充
+//************************************
+SparseMatrix<cv::Vec3b> get_spares_matrix(const cv::Mat img, const int dilated, const bool extend)
+{
+	int rows = img.rows;
+	int cols = img.cols;
+	SparseMatrix<cv::Vec3b> sm(rows, cols, cv::Vec3b(0, 0, 0));
+	for (int row_i = 0; row_i < rows; row_i += dilated + 1)
+	{
+		for (int col_j = 0; col_j < cols; col_j += dilated + 1)
+		{
+			cv::Vec3b pixel = img.at<cv::Vec3b>(row_i, col_j);
+			sm.add(row_i, col_j, pixel);
+			//temp_img.ptr<uchar>(row_i)[col_j] = 255;
+			if (extend)
+			{
+				for (int i = 1; i < dilated + 1; i++)
+				{
+					int temp_row = row_i + i;
+					int temp_col = col_j + i;
+					if (temp_row < rows && temp_col << cols)
+					{
+						pixel = img.at<cv::Vec3b>(temp_row, temp_col);
+						sm.add(temp_row, temp_col, pixel);
+					}
+				}
+			}
+		}
+	}
+	return sm;
+}
+
+//************************************
+// Method:    计算空间内点到直线的距离
+// FullName:  dis_p_l
+// Access:    public 
+// Returns:   double 空间内点到直线的距离
+// Qualifier:
+// Parameter: const V & v 空间直线的方向向量
+// Parameter: const cv::Point & p 空间直线经过的点
+// Parameter: int row 另一点的行索引
+// Parameter: int col 另一点你的列索引
+//************************************
+double dis_p_l(const V& v, const cv::Point& p, int row, int col)
+{
+	double k = (v._x * (row - p.x) + v._y * (col - p.y)) / (pow(v._x, 2) + pow(v._y, 2) + pow(v._z, 2));
+	double dis = sqrt(pow(v._x * k + p.x - row, 2) + pow(v._y * k + p.y - col, 2) + pow(v._z * k, 2));
+	return dis;
+}
+//************************************
+// Method:    计算稀疏矩阵上各点到直线的距离
+// FullName:  distense
+// Access:    public 
+// Returns:   void
+// Qualifier:
+// Parameter: const cv::Point & p 变形点p
+// Parameter: SparseMatrix<cv::Vec3b> & sm 稀疏矩阵
+//************************************
+void distense(SparseMatrix<cv::Vec3b>& sm, const cv::Point& p, const V& v, double& max_dis)
+{
+	size_t len = sm._sm.size();
+	double dis;
+	for (size_t i = 0; i < len; i++)
+	{
+		dis = dis_p_l(v, p, sm._sm[i]._col, sm._sm[i]._row);
+		max_dis = max(max_dis, dis);
+		sm._sm[i]._dis = dis;
+	}
+}
+
+//************************************
+// Method:    为图像添加扭曲和折叠效果
+// FullName:  folds_curves_img
+// Access:    public 
+// Returns:   cv::Mat 添加扭曲和折叠之后的图片
+// Qualifier:
+// Parameter: const cv::Mat img 原图像
+// Parameter: const V & v 存储了直线方向和强度的结构体
+// Parameter: const SparseMatrix<cv::Vec3b> & sm 稀疏矩阵，里面存储的是需要改变的点
+// Parameter: const int alpha 控制效果传播距离的变量，越大，效果越全局；越小，效果越局部
+// Parameter: const double & max_dis 点到直线的最大距离
+//************************************
+cv::Mat folds_curves_img(const cv::Mat img, const V& v, const SparseMatrix<cv::Vec3b>& sm, const int alpha, const double& max_dis)
+{
+	int relax = v._strength * 4;
+	cv::Mat new_img = cv::Mat(img.rows + relax + 2, img.cols + relax + 2, img.type(), cv::Scalar::all(0));
+	size_t len = sm._sm.size();
+	for (size_t i = 0; i < len; i++)
+	{
+		// 添加扭曲效果
+		double w = 1 - pow(sm._sm[i]._dis / max_dis, alpha); //扭曲
+		//cout << "dis:" << sm._sm[i]._dis / max_dis << ",w:" << w << endl;
+		//double cur_x_angle = w * v._x_angle;
+		double cur_x_angle = v._x_angle;
+		double cur_strength = w * v._strength;
+		int row = sm._sm[i]._row - int(cur_strength * sin(cur_x_angle));
+		int col = sm._sm[i]._col + int(cur_strength * cos(cur_x_angle));
+
+		// 添加折叠效果
+		w = alpha / (sm._sm[i]._dis / max_dis + alpha); //折叠
+		cur_x_angle = w * v._x_angle;
+		cur_strength = w * v._strength;
+		row -= int(cur_strength * sin(cur_x_angle));
+		col += int(cur_strength * cos(cur_x_angle));
+
+		row += relax / 2 + 1;
+		col += relax / 2 + 1;
+		//new_img.at<cv::Vec3b>(row, col) = sm._sm[i]._data;
+		//cout << row << " " << col << " " << new_img.rows << " " << new_img.cols << endl;
+		new_img.at<cv::Vec3b>(row, col) = sm._sm[i]._data;
+	}
+	return new_img;
+}
+
+//************************************
+// Method:    为图像添加扭曲和折叠效果
+// FullName:  folds_curves_img_vector
+// Access:    public 
+// Returns:   cv::Mat 添加扭曲和折叠之后的图片
+// Qualifier:
+// Parameter: const cv::Mat img 原图像
+// Parameter: const V & v 存储了直线方向和强度的结构体
+// Parameter: const cv::Point & p 选取的起始扭曲点
+// Parameter: const int alpha 控制效果传播距离的变量，越大，效果越全局；越小，效果越局部
+//************************************
+cv::Mat folds_curves_img_vector(const cv::Mat img, const V& v, const cv::Point& p, const int alpha)
+{
+	int rows = img.rows;
+	int cols = img.cols;
+	int relax = v._strength * 4;
+	cv::Mat new_img = cv::Mat(rows + relax + 2, cols + relax + 2, img.type(), cv::Scalar(0,255,0));
+	double max_dis;
+	vector<double> dis_list;
+	for (int row_i = 0; row_i < rows; row_i++)
+	{
+		for (int col_j = 0; col_j < cols; col_j++)
+		{
+			double dis = dis_p_l(v, p, row_i, col_j);
+			dis_list.push_back(dis);
+			max_dis = max(dis, max_dis);
+		}
+	}
+	int i = 0;
+	int min_row = rows + relax + 2;
+	int min_col = cols + relax + 2;
+	int max_row = 0;
+	int max_col = 0;
+
+	col_left_move = 0;
+	row_top_move = 0;
+	col_right_move = cols + relax + 2;
+	row_bottom_move = rows + relax + 2;
+
+	for (int row_i = 0; row_i < rows; row_i++)
+	{
+		for (int col_j = 0; col_j < cols; col_j++)
+		{
+			cv::Vec3b pixel = img.at<cv::Vec3b>(row_i, col_j);
+			// 添加扭曲效果
+			double dis = dis_list[i] / max_dis;
+			double w = 1 - pow(dis, alpha); //扭曲
+
+			double cur_strength = w * v._strength * cos(v._z_angle);
+			int row = int(cur_strength * sin(v._x_angle));
+			int col = int(cur_strength * cos(v._x_angle));
+
+			// 添加折叠效果
+			w = alpha / (dis + alpha); //折叠
+			cur_strength =  w * v._strength * cos(v._z_angle);
+			row += int(cur_strength * sin(v._x_angle));
+			col += int(cur_strength * cos(v._x_angle));
+			
+			row += relax / 2 + 1 + row_i;
+			col += relax / 2 + 1 + col_j;
+			if (row_i == 0)
+			{
+				row_top_move = max(row, row_top_move);
+			}
+			else if (row_i == rows - 1)
+			{
+				row_bottom_move = min(row, row_bottom_move);
+			}
+			if (col_j == 0)
+			{
+				//cout << row << " " << col << endl;
+				col_left_move = max(col, col_left_move);
+			}
+			else if (col_j == cols - 1)
+			{
+				col_right_move = min(col, col_right_move);
+			}
+			min_row = min(min_row, row);
+			max_row = max(max_row, row);
+			min_col = min(min_col, col);
+			max_col = max(max_col, col);
+			new_img.at<cv::Vec3b>(row, col) = img.at<cv::Vec3b>(row_i, col_j);
+			i++;
+		}
+	}
+	row_top_move -= min_row;
+	col_left_move -= min_col;
+	row_bottom_move = max_row - row_bottom_move;
+	col_right_move = max_col - col_right_move;
+	return new_img(cv::Rect(min_col, min_row, max_col - min_col + 1, max_row - min_row + 1));
+}
+
+//************************************
+// Method:    对像素进行插值
+// FullName:  linear_interp
+// Access:    public 
+// Returns:   cv::Mat
+// Qualifier:
+// Parameter: cv::Mat img 生成的图像
+// Parameter: int field_size 插值的邻域 经过测试，5为最佳值
+//************************************
+cv::Mat linear_interp(cv::Mat img, int field_size)
+{
+	int start = -field_size / 2;
+	int end = field_size / 2 + 1;
+	cv::Mat dstImage = img.clone();
+	int rows = dstImage.rows;
+	int cols = dstImage.cols;
+	int channels = dstImage.channels();
+
+	cv::Vec3b temp_pixel;
+
+	for (int row_i = abs(start); row_i < rows - end; row_i++)
+	{
+		for (int col_j = abs(start); col_j < cols - end; col_j++)
+		{
+			temp_pixel = dstImage.at<cv::Vec3b>(row_i, col_j);
+			if (temp_pixel[0] == 0 && temp_pixel[1] == 255 && temp_pixel[2] == 0)
+			{
+				int num, a, b, c;
+				num = a = b = c = 0;
+				cv::Vec3b temp_pixel1;
+				// 取8邻域内不为绿色像素的均值
+				for (int i = start; i < end; i++)
+				{
+					for (int j = start; j < end; j++)
+					{
+						temp_pixel1 = dstImage.at<cv::Vec3b>(row_i + i, col_j + j);
+						if (temp_pixel1[0] != 0  && temp_pixel1[1] != 255 && temp_pixel1[2] != 0)
+						{
+							a += temp_pixel1[0];
+							b += temp_pixel1[1];
+							c += temp_pixel1[2];
+							num++;
+						}
+					}
+				}
+				if (num > field_size*field_size / 2)
+				{
+					dstImage.at < cv::Vec3b >(row_i, col_j) = cv::Vec3b(a / num, b / num, c / num);
+				}
+			}
+		}
+	}
+	return dstImage;
+}
+
+cv::Mat add_background(cv::Mat img, const string& background_path, const V& v, int board)
+{
+	int rows = img.rows;
+	int cols = img.cols;
+	//int board = 50;
+	cv::Mat background_image = cv::imread(background_path);
+	//图片在背景图中放置的位置-先设为中间位置
+	cv::resize(background_image, background_image, cv::Size(cols + board * 2, rows + board * 2));
+	cv::Vec3b temp_pixel;
+	col_right_move = cols - col_right_move;
+	row_bottom_move = rows - row_bottom_move;
+	
+	// 从上到下
+	for (int col_j = 0; col_j < cols; col_j++)
+	{
+		for (int row_i = 0; row_i < rows; row_i++)
+		{
+			temp_pixel = img.at<cv::Vec3b>(row_i, col_j);
+			if (col_j > col_left_move && col_j < col_right_move && row_i > row_top_move && row_i < row_bottom_move)
+			{
+				background_image.at<cv::Vec3b>(row_i + board, col_j + board) = temp_pixel;
+			}
+
+			else {
+				if (temp_pixel[0] != 0 && temp_pixel[1] != 255 && temp_pixel[2] != 0)
+				{
+					background_image.at<cv::Vec3b>(row_i + board, col_j + board) = temp_pixel;
+				}
+			}
+		}
+	}
+	return background_image;
+}
+
+cv::Mat get_img_spares_matrix(const V& v, const cv::Point& p, cv::Mat& src, int a)
+{
+	//clock_t tic = clock();
+
+	int alpha = 1;
+
+	double max_dis = 0.0;
+	// 构造稀疏矩阵
+	//clock_t start = clock();
+	SparseMatrix<cv::Vec3b> sm = get_spares_matrix(src, a, true);
+	//cout << "构造稀疏矩阵时间：" << (float)(clock() - start) / CLOCKS_PER_SEC << "s" << endl;
+
+	// 开始计算距离
+	//start = clock();
+	distense(sm, p, v, max_dis);
+	//cout << "最大距离" << max_dis << endl;
+	//cout << "计算距离时间：" << (float)(clock() - start) / CLOCKS_PER_SEC << "s" << endl;
+
+
+
+	// 开始生成图片
+	cv::Mat new_img = folds_curves_img(src, v, sm, alpha, max_dis);
+	//cout << "生成图片时间：" << (float)(clock() - start) / CLOCKS_PER_SEC << "s" << endl;
+
+	//cout << "总时间：" << (float)(clock() - tic) / CLOCKS_PER_SEC << "s" << endl;
+	return new_img;
+}
+
+//************************************
+// Method:    生成一张图片
+// FullName:  generate_one_img
+// Access:    public 
+// Returns:   void
+// Qualifier:
+// Parameter: const string & img_path 扫描图像路径
+// Parameter: const string & background_path 背景图像路径
+//************************************
+void generate_one_img(const string& img_path, const string& background_path)
+{
+	cv::Mat src = cv::imread(img_path);
+	srand((unsigned)time(NULL));
+	// 随机选取变形的p点
+	cv::Point p(random_int(src.cols), random_int(src.rows));
+	cout << "随机选择的p点坐标 row:" << p.y << ",col:" << p.x << endl;
+
+	// 随机选取变形v的方向和强度
+
+	V v(100);
+	cout << v << endl;
+
+	clock_t tic = clock();
+	int alpha = 1;
+
+	// 开始生成图片
+	clock_t start = clock();
+	cv::Mat new_img = folds_curves_img_vector(src, v, p, alpha);
+	cout << "生成图片时间：" << (float)(clock() - start) / CLOCKS_PER_SEC << "s" << endl;
+
+	// 开始插值
+	start = clock();
+	cv::Mat dst_img = linear_interp(new_img, 5);
+	cout << "插值时间：" << (float)(clock() - start) / CLOCKS_PER_SEC << "s" << endl;
+
+	// 开始添加背景
+	start = clock();
+	cv::Mat final_img = add_background(dst_img, background_path, v, 50);
+	cout << "加背景时间：" << (float)(clock() - start) / CLOCKS_PER_SEC << "s" << endl;
+	//替换背景
+	cout << "总时间：" << (float)(clock() - tic) / CLOCKS_PER_SEC << "s" << endl;
+	//cv::circle(src, p, 5, cv::Scalar(0, 255, 0), 2);
+
+	// 计算p点的新位置
+	p.y = p.y - int(v._strength * sin(v._x_angle)) + 250;
+	p.x = p.x + int(v._strength * cos(v._x_angle)) + 250;
+	cout << "新的p row:" << p.y << ",p col:" << p.x << endl;
+	cv::circle(new_img, p, 5, cv::Scalar(0, 255, 0), 2);
+	cv::circle(src, cv::Point(p.x - 250, p.y - 250), 5, cv::Scalar(0, 0, 255), 2);
+	cv::resize(src, src, cv::Size(src.cols / 2, src.rows / 2));
+	cv::imshow("src", src);
+
+	cv::resize(new_img, new_img, cv::Size(new_img.cols / 2, new_img.rows / 2));
+	cv::imshow("new_img", new_img);
+
+	cv::circle(dst_img, p, 5, cv::Scalar(0, 255, 0), 2);
+	cv::resize(dst_img, dst_img, cv::Size(dst_img.cols / 2, dst_img.rows / 2));
+	cv::imshow("dst", dst_img);
+
+	cv::circle(final_img, p, 5, cv::Scalar(0, 255, 0), 2);
+	cv::resize(final_img, final_img, cv::Size(final_img.cols / 2, final_img.rows / 2));
+	cv::imshow("final_img", final_img);
+}
+
+//************************************
+// Method:    生成一张图片的py接口
+// FullName:  generate_one_img_py
+// Access:    public 
+// Returns:   DLLEXPORT int
+// Qualifier:
+// Parameter: const char * img_path 扫描图像路径
+// Parameter: const char * background_path 背景图像路径
+// Parameter: const char * save_path 图像保存路径
+// Parameter: int v_len 变形的强度
+// Parameter: int board 背景图像加在原始图像上的边界
+// Parameter: int filter_pixel 过滤黑色像素的阈值
+// Parameter: int alpha 变形的传播程度
+//************************************
+extern "C"
+{
+	int generate_one_img_py(const char* img_path, const char* background_path, const char* save_path, int v_len, int board,int kernel, int alpha)
+	{
+		if (v_len <= 0 || board < 0 || alpha <= 0)
+		{
+			cout << "v_len must > 0,board must >= 0,alpha must > 0" << endl;
+			return 0;
+		}
+		try
+		{
+			cv::Mat src = cv::imread(img_path);
+			srand((unsigned)time(NULL));
+			// 随机选取变形的p点
+			cv::Point p(random_int(src.cols), random_int(src.rows));
+			// 随机选取变形v的方向和强度
+			V v(v_len);
+
+			// 开始生成图片
+			cv::Mat new_img = folds_curves_img_vector(src, v, p, alpha);
+
+			// 开始插值
+			cv::Mat dst_img = linear_interp(new_img, kernel);
+
+			// 开始添加背景
+			cv::Mat final_img = add_background(dst_img, background_path, v, board);
+			cv::imwrite(save_path, final_img);
+
+			return 1;
+		}
+		catch (const char* msg)
+		{
+			cout << msg << endl;
+			return 0;
+		}
+	}
+}
+int main()
+{
+	generate_one_img("/data/zj/docUnet/py/data_generator/4.jpg", "/data/zj/docUnet/py/data_generator/4_result.jpg");
+	cv::waitKey();
+	system("pause");
+	return 0;
+}

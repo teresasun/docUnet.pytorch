@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "*.asv": "csv",
+        "limits": "cpp",
+        "vector": "cpp",
+        "xstring": "cpp",
+        "ostream": "cpp",
+        "iostream": "cpp",
+        "xlocale": "cpp"
+    }
+}

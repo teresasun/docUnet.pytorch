@@ -1,0 +1,3 @@
+/data1/zj/docUnet/cpp/clip_img/build/CMakeFiles/edit_cache.dir
+/data1/zj/docUnet/cpp/clip_img/build/CMakeFiles/rebuild_cache.dir
+/data1/zj/docUnet/cpp/clip_img/build/CMakeFiles/clip_img.dir
